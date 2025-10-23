@@ -1,0 +1,55 @@
+name: M3U Playlist Health Check and Update
+
+# Controls when the workflow will run
+on:
+  # Allows manual triggering from the GitHub Actions tab
+  workflow_dispatch:
+  
+  # Triggers the workflow every 6 hours (at the top of the hour)
+  schedule:
+    - cron: '0 */6 * * *'
+    
+  # Triggers the workflow when changes are pushed to the main branch
+  push:
+    branches: [ main ]
+    paths:
+      # Run if the script or server list changes
+      - 'update_m3u.py'
+      - 'servers.txt'
+
+jobs:
+  update-m3u:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checks out your repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      # Step 2: Sets up the Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Use a stable Python 3 version
+          python-version: '3.x'
+          
+      # Step 3: Installs the required Python package (requests)
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      # Step 4: Runs your M3U update script
+      - name: Run playlist updater
+        run: python update_m3u.py
+      
+      # Step 5: Commits the updated Backup.m3u back to the repository
+      # This step is crucial for making the changes persistent
+      - name: Commit updated playlist
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Automated: M3U updated with a working server link"
+          # Only commit the modified playlist file
+          files: Backup.m3u
+          # Uses the current branch (e.g., main)
+          branch: ${{ github.ref_name }}
