@@ -40,6 +40,7 @@ def extract_channel_paths(playlist_filepath):
             lines = f.readlines()
             
         # Regex to capture the base URL (Group 1) and the path (Group 2)
+        # Note: 'fl\d+' matches fl1, fl2, etc.
         regex_pattern = re.compile(rf'(https?://fl\d+\.{re.escape(TARGET_DOMAIN)})(/.+\.m3u8)')
         
         for line in lines:
@@ -86,8 +87,8 @@ def check_server_health(server_list, test_paths):
             
             try:
                 # Send a GET request to ensure the M3U8 file itself is accessible
-                # Using a 5-second timeout for this individual path check
-                response = requests.get(full_test_url, timeout=5, allow_redirects=True) 
+                # *** Increased timeout from 5 to 15 seconds to avoid connection errors ***
+                response = requests.get(full_test_url, timeout=15, allow_redirects=True) 
                 
                 # If status is not 200 (e.g., 404, 500, etc.), the server fails
                 if response.status_code != 200:
@@ -97,7 +98,7 @@ def check_server_health(server_list, test_paths):
                 
             except requests.exceptions.RequestException as e:
                 # Connection error (timeout, DNS failure, etc.), the server fails
-                print(f"  -> FAIL: Server {server_url} failed on path {i+1}/{num_paths} ({test_path}) due to connection error.")
+                print(f"  -> FAIL: Server {server_url} failed on path {i+1}/{num_paths} ({test_path}) due to connection error. (Timeout may be too short)")
                 is_server_working = False
                 break # Stop checking paths for this server and move to the next server
             
