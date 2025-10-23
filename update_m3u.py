@@ -7,7 +7,10 @@ import time
 PLAYLIST_FILE = 'Backup.m3u'
 SERVER_LIST_FILE = 'servers.txt'
 TARGET_DOMAIN = 'moveonjoy.com'
-TARGET_PREFIX = 'http://fl1.' # The base URL prefix to replace
+
+# --- Global state variables (Do not change these values directly) ---
+TEST_CHANNEL_PATH = ''
+INITIAL_SERVER_BASE = ''
 
 def load_servers(filepath):
     """Loads and cleans the list of potential working servers."""
@@ -20,86 +23,91 @@ def load_servers(filepath):
         print(f"Error: Server list file '{filepath}' not found.")
         return []
 
-def check_server_health(server_list):
+def get_test_channel_path(playlist_filepath):
     """
-    Checks the health of the servers by attempting a simple HEAD request.
-    Returns a list of working base server URLs.
+    Reads the playlist to determine the path of the first moveonjoy.com link.
+    This path will be used to test the health of other servers.
+    Example: Extracts '/ABC_EAST/index.m3u8' from 'http://fl1.moveonjoy.com/ABC_EAST/index.m3u8'
+    """
+    global TEST_CHANNEL_PATH, INITIAL_SERVER_BASE
+    
+    try:
+        with open(playlist_filepath, 'r') as f:
+            lines = f.readlines()
+            
+        # Regex to capture the base URL (Group 1) and the path (Group 2)
+        regex_pattern = re.compile(rf'(https?://fl\d+\.{re.escape(TARGET_DOMAIN)})(/.+\.m3u8)')
+        
+        for line in lines:
+            if re.search(TARGET_DOMAIN, line):
+                match = regex_pattern.search(line)
+                if match:
+                    # Group 1 is the base server (e.g., http://fl1.moveonjoy.com)
+                    INITIAL_SERVER_BASE = match.group(1).rstrip('/')
+                    # Group 2 is the relative path (e.g., /ABC_EAST/index.m3u8)
+                    TEST_CHANNEL_PATH = match.group(2)
+                    print(f"Found initial server base: {INITIAL_SERVER_BASE}")
+                    print(f"Identified test channel path: {TEST_CHANNEL_PATH}")
+                    return True
+        
+        print(f"Error: Could not find a '{TARGET_DOMAIN}' link in the playlist to determine the test channel path.")
+        return False
+        
+    except FileNotFoundError:
+        print(f"Error: Playlist file '{playlist_filepath}' not found.")
+        return False
+
+def check_server_health(server_list, test_path):
+    """
+    Checks the health of the servers by attempting to load a specific channel's M3U8 file.
+    Returns a list containing ONE working base server URL, or an empty list.
+    We stop and return immediately upon finding the first 200 OK response.
     """
     working_servers = []
-    print("Starting server health check...")
-    
-    # We only need the domain name, not the full path like http://flX.moveonjoy.com
-    # We will use the prefix 'fl' to test reachability.
-    
-    # For this script, we assume the server list contains the base addresses (e.g., http://fl1.moveonjoy.com)
-    # The actual M3U channels append a path (e.g., /ABC_EAST/index.m3u8).
-    
-    # A simple way to check is to try to connect to the base server path.
-    # However, since we are only concerned with the domain part in the M3U8, 
-    # and the user provides a list of *potential* servers, we will assume the 
-    # first few that respond are good candidates.
-    
-    # A simple connection check is performed, though a true "working" check 
-    # would involve a specific M3U8 file test, which is more complex and slow.
+    print("\nStarting robust server health check (testing a specific channel)...")
     
     for server_url in server_list:
+        # Construct the full URL to the M3U8 file
+        full_test_url = server_url + test_path
+        
         try:
-            # Send a HEAD request for speed, with a short timeout
-            response = requests.head(server_url, timeout=5, allow_redirects=True)
-            # A 200 (OK) or 300-399 (redirect success) is often a sign of life
-            if 200 <= response.status_code < 400:
-                print(f"Server {server_url} is reachable (Status: {response.status_code}).")
+            # Send a GET request to ensure the M3U8 file itself is accessible
+            # Use a longer timeout (10 seconds) for this critical check
+            response = requests.get(full_test_url, timeout=10, allow_redirects=True)
+            
+            # We are looking for an HTTP 200 OK status, confirming stream availability
+            if response.status_code == 200:
+                print(f"SUCCESS: Server {server_url} is live and the test channel is responding.")
                 working_servers.append(server_url)
-                # We often only need one or two working servers. Let's find a few
-                if len(working_servers) >= 5: 
-                    break # Stop after finding 5 good servers to save time
+                # Return immediately to save time, as we only need one working server.
+                return working_servers 
             else:
-                print(f"Server {server_url} returned status code {response.status_code}.")
+                print(f"FAILED: Server {server_url} returned status code {response.status_code} for {full_test_url}.")
+        
         except requests.exceptions.RequestException as e:
-            print(f"Server {server_url} failed to connect: {e.__class__.__name__}")
+            # Handle connection errors, DNS failure, timeouts, etc.
+            print(f"FAILED: Server {server_url} failed to connect or time out: {e.__class__.__name__}")
         
         # Add a small delay to avoid hammering the servers
         time.sleep(0.5) 
         
-    print(f"Found {len(working_servers)} working servers.")
+    print("No working servers found after checking the entire list.")
     return working_servers
 
-def update_playlist(playlist_filepath, working_servers):
+def update_playlist(playlist_filepath, new_base_url):
     """
-    Reads the M3U file, replaces the moveonjoy.com server with a working one,
+    Reads the M3U file, replaces the old server base with the new working one,
     and writes the updated content back to the file.
     """
-    if not working_servers:
-        print("No working servers found. Playlist will not be updated.")
+    global INITIAL_SERVER_BASE
+    
+    if not new_base_url or not INITIAL_SERVER_BASE:
+        print("Update aborted: Missing new server URL or initial server base.")
         return False
-
-    # Use the first reliable server found for replacements
-    # We need the base server URL to replace the flX part
-    
-    # Extract the base domain part of the working server (e.g., http://flN.moveonjoy.com)
-    # The M3U lines start with http://fl1.moveonjoy.com/
-    
-    # The new base URL to use for replacements
-    new_base_url = working_servers[0].rstrip('/') 
-    
-    # The pattern to find lines we need to change. 
-    # It looks for http://fl[any digit].moveonjoy.com
-    # We make the regex generic to catch all flX domains that might be in the playlist already.
-    # We need to capture the path part so we can re-append it.
-    
-    # Regex to capture the full URL and separate the path
-    # Example: http://fl1.moveonjoy.com/ABC_EAST/index.m3u8
-    # Group 1: The full flX.moveonjoy.com part to be replaced
-    # Group 2: The rest of the path (/ABC_EAST/index.m3u8)
-    
-    # NOTE: The provided sample playlist uses 'http://fl1.moveonjoy.com/...' 
-    # We'll target the whole prefix to be safe, but use a more robust regex.
-    
-    # Regex targets: http(s)://fl[digits].moveonjoy.com
-    # It will capture the path (e.g., /ABC_EAST/index.m3u8)
-    
-    # The core domain pattern: (https?://fl\d+\.moveonjoy\.com)
-    regex_pattern = re.compile(rf'(https?://fl\d+\.{re.escape(TARGET_DOMAIN)})')
+        
+    # The pattern targets the exact server base found in the M3U file.
+    # We escape it for safe regex substitution.
+    regex_pattern = re.compile(re.escape(INITIAL_SERVER_BASE), re.IGNORECASE)
     
     replacement_made = False
     new_lines = []
@@ -108,42 +116,33 @@ def update_playlist(playlist_filepath, working_servers):
         with open(playlist_filepath, 'r') as f:
             lines = f.readlines()
             
-        print(f"Replacing links using new base server: {new_base_url}")
+        print(f"\nReplacing all instances of '{INITIAL_SERVER_BASE}' with '{new_base_url}'")
         
         for line in lines:
-            if re.search(TARGET_DOMAIN, line):
-                # This line contains a target link, attempt replacement
-                match = regex_pattern.search(line)
-                if match:
-                    # The full path suffix remains the same
-                    # line.replace(match.group(1), new_base_url) 
-                    
-                    # We want to perform the substitution on the whole line
-                    # using the specific matched group (match.group(1) is the old server URL)
-                    new_line = line.replace(match.group(1), new_base_url)
-                    
-                    if new_line != line:
-                        print(f"  Updated link for: {line.split(',')[-1].strip()}")
-                        replacement_made = True
-                        new_lines.append(new_line)
-                    else:
-                         # This shouldn't happen if regex matches, but keep original if no change
-                         new_lines.append(line)
+            # Check if the line contains the old base server URL
+            if INITIAL_SERVER_BASE in line:
+                # Perform the replacement using the new base URL
+                new_line = regex_pattern.sub(new_base_url, line)
+                
+                if new_line != line:
+                    channel_name = line.split(',')[-1].strip()
+                    print(f"  Updated link for: {channel_name}")
+                    replacement_made = True
+                    new_lines.append(new_line)
                 else:
-                    # If it has the domain but doesn't match the specific flX pattern, keep original
-                    new_lines.append(line)
+                     new_lines.append(line)
             else:
-                # Keep all non-target lines (EXTINF headers, non-moveonjoy links)
+                # Keep all non-target lines 
                 new_lines.append(line)
 
         # Write the updated content back to the M3U file
         if replacement_made:
             with open(playlist_filepath, 'w') as f:
                 f.writelines(new_lines)
-            print(f"Successfully updated '{playlist_filepath}' with a working server.")
+            print(f"\nSuccessfully updated '{playlist_filepath}' to use {new_base_url}.")
             return True
         else:
-            print(f"No changes needed or no target links found in '{playlist_filepath}'.")
+            print(f"No changes needed or no target links found for replacement in '{playlist_filepath}'.")
             return False
 
     except FileNotFoundError:
@@ -155,22 +154,32 @@ def update_playlist(playlist_filepath, working_servers):
 
 
 def main():
-    # 1. Load the list of potential servers
+    # 1. First, extract the channel path from the M3U file
+    if not get_test_channel_path(PLAYLIST_FILE):
+        return
+        
+    # 2. Load the list of potential servers (fl1.moveonjoy.com, fl2.moveonjoy.com, etc.)
     all_servers = load_servers(SERVER_LIST_FILE)
     if not all_servers:
         print("Script aborted: No servers available.")
         return
 
-    # 2. Check which servers are currently reachable
-    working_servers = check_server_health(all_servers)
+    # 3. Check which servers are currently reachable using the specific channel path
+    # This will search the entire list until ONE working server is found.
+    working_servers = check_server_health(all_servers, TEST_CHANNEL_PATH)
 
-    # 3. Update the playlist file with the best working server
+    # 4. Update the playlist file with the first (and best) working server found
     if working_servers:
-        update_playlist(PLAYLIST_FILE, working_servers)
+        new_server = working_servers[0]
+        # Check if the new server is different from the one currently in the playlist
+        if new_server == INITIAL_SERVER_BASE:
+            print(f"\nServer is already using the best working base ({INITIAL_SERVER_BASE}). No update necessary.")
+        else:
+            update_playlist(PLAYLIST_FILE, new_server)
     else:
-        print("Playlist not updated as no working servers were found.")
+        print("\nPlaylist not updated as NO WORKING SERVERS were found in the list.")
 
 
 if __name__ == "__main__":
-    # Ensure 'requests' library is installed and available in the GitHub Action environment
+    # Note: Requires the 'requests' library (pip install requests) to run successfully.
     main()
